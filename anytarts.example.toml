@@ -1,0 +1,11 @@
+hostname = "anytarts"
+state_dir = "/Users/ali/.local/state/anytarts"
+tart = "/Users/ali/.local/bin/tart"
+max_vms = 2
+
+[vm.dev]
+image = "ci-dev"
+keys = ["ssh-ed25519 AAAA... her public key"]
+cpu = 8
+memory_gb = 16
+idle = "30m"
