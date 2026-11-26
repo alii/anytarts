@@ -38,9 +38,33 @@ func TestSSHConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(string(out))
 	}
-	for _, want := range []string{"hostname dev\n", "user admin\n", "proxyjump box.example.net\n", "controlpersist 300\n"} {
+	for _, want := range []string{"hostname dev\n", "user admin\n", "controlpersist 300\n"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("no %q", want)
+		}
+	}
+}
+
+func TestProxyHost(t *testing.T) {
+	dir := t.TempDir()
+	writeSSHConfig(dir, "box.example.net")
+	out, _ := exec.Command("/usr/bin/ssh", "-F", filepath.Join(dir, "anytarts.conf"), "-G", "dev").Output()
+	for line := range strings.Lines(string(out)) {
+		if m := proxyHost.FindStringSubmatch(strings.TrimSpace(line)); m != nil && m[1] == "box.example.net" {
+			return
+		}
+	}
+	t.Fatalf("doctor can't find the host in %s", out)
+}
+
+func TestForwardArgs(t *testing.T) {
+	got, err := forwardArgs([]string{"8080", "3000:80"})
+	if err != nil || !strings.Contains(strings.Join(got, " "), "-L 127.0.0.1:8080:localhost:8080 -L 127.0.0.1:3000:localhost:80 dev") {
+		t.Fatal(got, err)
+	}
+	for _, bad := range []string{"", "0", "70000", "a:1", "1:2:3", "-D1", "1:"} {
+		if _, err := forwardArgs([]string{bad}); err == nil {
+			t.Errorf("took %q", bad)
 		}
 	}
 }
@@ -81,7 +105,7 @@ func TestRelay(t *testing.T) {
 
 func TestScreenshot(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.png")
-	fakeSSH(t, `printf '\211PNG\r\n\032\nrest'`)
+	fakeSSH(t, `[ "$1" = -O ] && exit 0; printf '\211PNG\r\n\032\nrest'`)
 	if err := screenshot([]string{p}); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +143,7 @@ func TestKeychainPathExpands(t *testing.T) {
 func TestScreenshotTwoDisplays(t *testing.T) {
 	dir := t.TempDir()
 	// The message simctl really gave for a foldable.
-	fakeSSH(t, `case "$2" in
+	fakeSSH(t, `[ "$1" = -O ] && exit 0; case "$2" in
 *--display=*) printf '\211PNG\r\n\032\n'; echo "$2" ;;
 *) cat >&2 <<X
 An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=22):

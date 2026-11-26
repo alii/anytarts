@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +26,8 @@ const usage = `anytarts controls your VM from your own Mac.
 
   anytarts setup HOST       set this Mac up to use the VM behind HOST
   anytarts ssh [COMMAND]    open a terminal in the VM, or run a command there
+  anytarts forward PORTS    reach the VM's ports from this Mac, such as 8080 or
+                            3000:8080 (this Mac's port, then the VM's)
   anytarts screen           see the VM's screen
   anytarts screenshot [F]   save a picture of the VM's simulator (--display N for one screen)
   anytarts unlock           unlock the VM's keychain
@@ -59,9 +62,18 @@ func client(args []string) error {
 	case "setup":
 		return setupClient(args)
 	case "ssh":
+		if err := wake(); err != nil {
+			return err
+		}
 		return become("ssh", append([]string{vmName}, args...)...)
 	case "unlock":
+		if err := wake(); err != nil {
+			return err
+		}
+		fmt.Println("This lasts until your shared connection closes, about 5 minutes after the last command.")
 		return become("ssh", "-t", vmName, "security unlock-keychain "+keychain)
+	case "forward":
+		return forwardPorts(args)
 	case "screen":
 		return screen()
 	case "screenshot":
@@ -88,6 +100,23 @@ func become(name string, args ...string) error {
 		return err
 	}
 	return syscall.Exec(path, append([]string{name}, args...), os.Environ())
+}
+
+// wake logs in once, showing the doorman's messages, unless a shared connection
+// is already open. Without it they'd be lost when there's no terminal, because
+// ssh hides a proxy's stderr from a connection that uses ControlPersist.
+func wake() error {
+	if exec.Command("ssh", "-O", "check", vmName).Run() == nil {
+		return nil
+	}
+	c := exec.Command("ssh", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", vmName, "true")
+	// No stdin: it belongs to the real command. ssh asks its questions on the
+	// terminal itself.
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		return errors.New("couldn't log in to the VM; anytarts doctor may say why")
+	}
+	return nil
 }
 
 func setupClient(args []string) error {
@@ -132,6 +161,10 @@ func setupClient(args []string) error {
 	return nil
 }
 
+// writeSSHConfig uses a ProxyCommand instead of ProxyJump so that the doorman's
+// messages reach the terminal; with ControlPersist ssh sends a proxy's stderr to
+// /dev/null.
+//
 // writeSSHConfig keeps our settings in a file of their own, and adds one line
 // to the main config to include it. The line goes first because ssh takes the
 // first value it finds, and an Include inside a Host block only applies there.
@@ -141,7 +174,7 @@ func writeSSHConfig(dir, host string) error {
 Host %[1]s
   HostName %[1]s
   User admin
-  ProxyJump %[2]s
+  ProxyCommand /bin/sh -c 'if (: >/dev/tty) 2>/dev/null; then exec 2>/dev/tty; fi; exec ssh -W "[%%h]:%%p" %[2]s'
   ControlMaster auto
   ControlPath ~/.ssh/cm-%%C
   ControlPersist 5m
@@ -185,12 +218,52 @@ Host %[1]s %[2]s
 	return os.WriteFile(main, []byte(next), 0o600)
 }
 
+func forwardArgs(specs []string) ([]string, error) {
+	if len(specs) == 0 {
+		return nil, errors.New("usage: anytarts forward PORT or LOCAL:REMOTE, as many as you like")
+	}
+	// Its own connection, so that Ctrl-C ends the forward and nothing else.
+	args := []string{"-N", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no",
+		"-o", "ExitOnForwardFailure=yes"}
+	for _, spec := range specs {
+		local, remote, two := strings.Cut(spec, ":")
+		if !two {
+			remote = local
+		}
+		for _, p := range []string{local, remote} {
+			if n, err := strconv.ParseUint(p, 10, 16); err != nil || n == 0 {
+				return nil, fmt.Errorf("%q isn't a port or LOCAL:REMOTE", spec)
+			}
+		}
+		args = append(args, "-L", "127.0.0.1:"+local+":localhost:"+remote)
+	}
+	return append(args, vmName), nil
+}
+
+func forwardPorts(specs []string) error {
+	args, err := forwardArgs(specs)
+	if err != nil {
+		return err
+	}
+	if err := wake(); err != nil {
+		return err
+	}
+	for i, a := range args {
+		if a == "-L" {
+			f := strings.Split(args[i+1], ":")
+			fmt.Printf("localhost:%s goes to the VM's port %s\n", f[1], f[3])
+		}
+	}
+	fmt.Println("Press Ctrl-C to stop. The VM stays on until you do.")
+	return become("ssh", args...)
+}
+
 // screen forwards Screen Sharing to the VM, and stops a little after its last
 // connection closes so that a forgotten one doesn't keep the VM on.
 func screen() error {
 	// Logging in first gets any questions out of the way.
-	if err := attached("ssh", vmName, "true").Run(); err != nil {
-		return fmt.Errorf("couldn't log in to the VM: %w", err)
+	if err := wake(); err != nil {
+		return err
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -205,12 +278,6 @@ func screen() error {
 	fmt.Println("Leave this running; it stops when you close Screen Sharing.")
 	relay(l, 15*time.Second)
 	return nil
-}
-
-func attached(name string, args ...string) *exec.Cmd {
-	c := exec.Command(name, args...)
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return c
 }
 
 // relay returns once there has been a connection and then none for grace.
@@ -287,6 +354,9 @@ func screenshot(args []string) error {
 	if *display != "" && !validDisplay.MatchString(*display) {
 		return fmt.Errorf("%q isn't a display", *display)
 	}
+	if err := wake(); err != nil {
+		return err
+	}
 	png, stderr, err := capture(*display)
 	if err == nil {
 		return savePicture(path, png)
@@ -313,29 +383,19 @@ func screenshot(args []string) error {
 }
 
 func capture(display string) (png []byte, stderr string, err error) {
-	cmd := "xcrun simctl io booted screenshot --type=png"
+	opts := "--type=png"
 	if display != "" {
-		cmd += " --display=" + display
+		opts += " --display=" + display
 	}
+	// simctl says "-" means stdout, but really writes a file called "-".
+	cmd := `f=$(mktemp -t anytarts) || exit 1; xcrun simctl io booted screenshot ` + opts +
+		` "$f" >&2 && cat "$f"; r=$?; /bin/rm -f "$f"; exit $r`
 	var out, errs bytes.Buffer
-	c := exec.Command("ssh", vmName, cmd+" -")
+	c := exec.Command("ssh", vmName, cmd)
 	c.Stdin, c.Stdout = os.Stdin, &out
-	c.Stderr = &progress{to: os.Stderr, all: &errs}
+	c.Stderr = &errs
 	err = c.Run()
 	return out.Bytes(), errs.String(), err
-}
-
-// progress passes on anytarts' own messages as they come, and keeps the rest to
-// be shown only if they turn out to matter.
-type progress struct {
-	to, all io.Writer
-}
-
-func (p *progress) Write(b []byte) (int, error) {
-	if bytes.HasPrefix(b, []byte("[anytarts]")) {
-		return p.to.Write(b)
-	}
-	return p.all.Write(b)
 }
 
 func savePicture(path string, png []byte) error {
@@ -349,19 +409,28 @@ func savePicture(path string, png []byte) error {
 	return nil
 }
 
+var proxyHost = regexp.MustCompile(`^proxycommand .*\[%h\]:%p" ([A-Za-z0-9.-]+)'$`)
+
 func doctor() error {
 	out, err := exec.Command("ssh", "-G", vmName).Output()
 	host := ""
 	for line := range strings.Lines(string(out)) {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "proxyjump "); ok {
-			host = v[strings.LastIndex(v, "@")+1:]
+		if m := proxyHost.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			host = m[1]
 		}
 	}
 	if err != nil || host == "" {
-		return errors.New("ssh isn't set up for the VM; run anytarts setup HOST")
+		return errors.New("ssh isn't set up for the VM; run anytarts setup HOST again")
 	}
 	fmt.Println("ok    ssh is set up")
-	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), 5*time.Second)
+	port := "22"
+	out, _ = exec.Command("ssh", "-G", host).Output()
+	for line := range strings.Lines(string(out)) {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "port "); ok {
+			port = v
+		}
+	}
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("%s can't be reached; check Tailscale is on and the invite was accepted", host)
 	}
@@ -370,7 +439,7 @@ func doctor() error {
 
 	fmt.Println("...   logging in, which starts the VM if it's off")
 	var seen bytes.Buffer
-	login := exec.Command("ssh", "-o", "BatchMode=yes", vmName, "true")
+	login := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", vmName, "true")
 	login.Stderr = io.MultiWriter(os.Stderr, &seen)
 	if err := login.Run(); err != nil {
 		return errors.New(diagnose(seen.String()))

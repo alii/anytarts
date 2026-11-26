@@ -22,8 +22,12 @@ over SSH. The code and its git checkout live in the VM.
 - Look at the simulator with `anytarts screenshot shot.png`, then read the
   file it names. A foldable has two screens, so it saves one file for each, such as
   `shot-display1.png`. Use `--display 1` for just one.
+- Reach a server in the VM with `anytarts forward 8080`, left running in the
+  background. It keeps the VM on, so stop it when done.
 - Commit and push work often. Only what's on GitHub survives the VM being wiped.
 - If something can't connect, run `anytarts doctor` and tell the user what it
   says.
+- The keychain locks again when the shared connection closes, 5 minutes after the
+  last command. If `gh` or signing complains, the user needs to unlock it again.
 - `anytarts screen` and `anytarts unlock` need the user, so ask them to run those.
   Never ask for the VM's password or put it in a command.
