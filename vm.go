@@ -98,16 +98,22 @@ func (v *VM) connect(ctx context.Context, port uint32, say func(string)) (net.Co
 	}
 }
 
-// wake gets the VM ready to log in to, telling say how it's going. It says
-// nothing if the VM is already up.
+// wake gets the VM ready to log in to. It speaks straight away and keeps
+// speaking, so that waiting never looks like a hang.
 func (v *VM) wake(ctx context.Context, say func(string)) error {
 	v.acquire()
 	defer v.release()
+	began := time.Now()
 	var mu sync.Mutex
-	var began time.Time
-	done := make(chan struct{})
-	defer close(done)
+	status := func(msg string) {
+		mu.Lock()
+		defer mu.Unlock()
+		say(msg)
+	}
+	status("Connecting to your VM...")
+	done, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(stopped)
 		tick := time.NewTicker(v.tick)
 		defer tick.Stop()
 		for {
@@ -115,37 +121,28 @@ func (v *VM) wake(ctx context.Context, say func(string)) error {
 			case <-done:
 				return
 			case <-tick.C:
-				mu.Lock()
-				if !began.IsZero() {
-					say(fmt.Sprintf("Still starting (%s)...", time.Since(began).Round(time.Second)))
-				}
-				mu.Unlock()
+				status(fmt.Sprintf("Still waiting for your VM (%s)...", time.Since(began).Round(time.Second)))
 			}
 		}
 	}()
-	c, err := v.connect(ctx, 22, func(msg string) {
-		mu.Lock()
-		defer mu.Unlock()
-		if began.IsZero() {
-			began = time.Now()
-		}
-		say(msg)
-	})
+	c, err := v.connect(ctx, 22, status)
+	close(done)
+	<-stopped
 	if err != nil {
 		return err
 	}
 	c.Close()
-	mu.Lock()
-	defer mu.Unlock()
-	if !began.IsZero() {
-		say("Your VM is ready.")
-	}
+	status("Your VM is ready. Logging in...")
 	return nil
 }
 
 func (v *VM) ensure(ctx context.Context, say func(string)) error {
 	v.power.Lock()
 	defer v.power.Unlock()
+	if v.hv.Running(ctx, v.name) {
+		return nil
+	}
+	say("Your VM is off. Checking for a free slot...")
 	exists, running, total, err := v.hv.State(ctx, v.name)
 	if err != nil || running {
 		return err

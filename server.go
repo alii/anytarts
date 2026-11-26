@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -115,6 +116,9 @@ func (s *Server) login(raw net.Conn) *ssh.ServerConfig {
 func explain(err error) string {
 	if errors.Is(err, errNoSlot) {
 		return err.Error()
+	}
+	if errors.Is(err, syscall.EHOSTUNREACH) {
+		return "the VM couldn't be reached; on its Mac, check Privacy & Security > Local Network allows anytarts"
 	}
 	return "the VM couldn't be reached"
 }

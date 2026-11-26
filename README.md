@@ -35,7 +35,8 @@ Use `ssh dev`. For Screen Sharing, run `ssh -L 5901:localhost:5900 dev` and open
 
 - An agent can stay on your own machine and drive the VM with `ssh dev <command>`.
   The `Control` lines let its commands share one connection, which is quicker.
-- The first command waits for the VM to boot.
+- The first command waits for the VM to boot, and says so on stderr.
+- macOS has to allow anytarts under Privacy & Security > Local Network.
 - Shutting down closes whatever is running.
 - A change to `image` doesn't touch a VM that already exists. To wipe one, run
   `tart delete dev`; the next connection makes a new copy.

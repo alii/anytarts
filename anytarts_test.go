@@ -26,6 +26,11 @@ type fake struct {
 	ipAfter               time.Time
 }
 
+func (f *fake) Running(context.Context, string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.running
+}
 func (f *fake) State(context.Context, string) (bool, bool, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -245,13 +250,13 @@ func TestMessagesInOpenSSH(t *testing.T) {
 		return string(out)
 	}
 	first := run()
-	for _, want := range []string{"Creating your VM", "Starting your VM", "Still starting", "Your VM is ready", "hi"} {
+	for _, want := range []string{"Connecting to your VM", "Creating your VM", "Starting your VM", "Still waiting", "Your VM is ready", "hi"} {
 		if !strings.Contains(first, want) {
 			t.Errorf("no %q in %s", want, first)
 		}
 	}
-	if second := run(); strings.Contains(second, "anytarts]") {
-		t.Errorf("spoke when the VM was up: %s", second)
+	if second := run(); !strings.Contains(second, "Connecting to your VM") || strings.Contains(second, "Starting") {
+		t.Errorf("wrong messages when the VM was up: %s", second)
 	}
 	t.Log(first)
 }

@@ -14,6 +14,8 @@ import (
 )
 
 type Hypervisor interface {
+	// Running is much quicker than State, for the usual case of a VM that's on.
+	Running(ctx context.Context, name string) bool
 	// State says whether the VM exists and is running, and how many VMs are
 	// running in all, CI's included.
 	State(ctx context.Context, name string) (exists, running bool, total int, err error)
@@ -40,6 +42,12 @@ func (t tart) run(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("tart %s: %w: %s", args[0], err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (t tart) Running(ctx context.Context, name string) bool {
+	out, err := t.run(ctx, "get", name, "--format", "json")
+	var vm struct{ Running bool }
+	return err == nil && json.Unmarshal([]byte(out), &vm) == nil && vm.Running
 }
 
 func (t tart) State(ctx context.Context, name string) (exists, running bool, total int, err error) {
