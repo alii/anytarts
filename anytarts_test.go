@@ -109,14 +109,14 @@ func setup(t *testing.T, f *fake) (addr string, key ssh.Signer) {
 	return l.Addr().String(), key
 }
 
-func client(addr string, k ssh.Signer) (*ssh.Client, error) {
+func dialSSH(addr string, k ssh.Signer) (*ssh.Client, error) {
 	return ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "x", Auth: []ssh.AuthMethod{ssh.PublicKeys(k)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
 }
 
 func TestWakesAndIdles(t *testing.T) {
 	f := &fake{}
 	addr, k := setup(t, f)
-	c, err := client(addr, k)
+	c, err := dialSSH(addr, k)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestWakesAndIdles(t *testing.T) {
 	}
 	c.Close()
 	time.Sleep(50 * time.Millisecond)
-	c2, _ := client(addr, k)
+	c2, _ := dialSSH(addr, k)
 	if _, err := c2.Dial("tcp", "dev:22"); err != nil {
 		t.Fatal(err)
 	}
@@ -153,13 +153,13 @@ func TestWakesAndIdles(t *testing.T) {
 func TestRefuses(t *testing.T) {
 	f := &fake{}
 	addr, k := setup(t, f)
-	if _, err := client(addr, signer(t)); err == nil {
+	if _, err := dialSSH(addr, signer(t)); err == nil {
 		t.Fatal("let in an unknown key")
 	}
 	if n, _ := f.counts(); n != 0 {
 		t.Error("an unknown key started the VM")
 	}
-	c, _ := client(addr, k)
+	c, _ := dialSSH(addr, k)
 	for _, to := range []string{"localhost:22", "127.0.0.1:22", "192.168.1.1:22", "other:22", "dev:80"} {
 		if _, err := c.Dial("tcp", to); err == nil {
 			t.Error("forwarded to", to)
@@ -176,7 +176,7 @@ func TestRefuses(t *testing.T) {
 func TestNoSlot(t *testing.T) {
 	f := &fake{others: 2}
 	addr, k := setup(t, f)
-	c, _ := client(addr, k)
+	c, _ := dialSSH(addr, k)
 	if _, err := c.Dial("tcp", "dev:22"); err == nil || !strings.Contains(err.Error(), "slots are in use") {
 		t.Fatal(err)
 	}

@@ -5,16 +5,26 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"tailscale.com/tsnet"
 )
 
 func main() {
+	// Flags alone mean the server; anything else is a command.
+	if len(os.Args) < 2 || !strings.HasPrefix(os.Args[1], "-") {
+		if err := client(os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "anytarts:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	path := flag.String("config", "anytarts.toml", "config file")
 	local := flag.String("listen", "", "listen on this address instead of Tailscale, for testing")
 	flag.Parse()

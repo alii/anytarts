@@ -21,20 +21,21 @@ DNS. `isolate = false` turns that off.
 
 ## Connecting
 
-    Host dev
-      User admin
-      ProxyJump anytarts
-      ControlMaster auto
-      ControlPath ~/.ssh/cm-%C
-      ControlPersist 5m
+On your own Mac, install anytarts and point it at the one that runs the VMs:
 
-Use `ssh dev`. For Screen Sharing, run `ssh -L 5901:localhost:5900 dev` and open
-`vnc://localhost:5901`.
+    curl -fsSL https://raw.githubusercontent.com/alii/anytarts/master/install.sh | sh
+    anytarts setup anytarts.example.ts.net
+
+Then use `anytarts ssh`, `anytarts screen` and the rest; `anytarts help` lists
+them. `anytarts guide --install` teaches Claude Code to use the VM.
+
+`setup` writes `~/.ssh/anytarts.conf` and includes it from your SSH config, so
+plain `ssh dev` and `scp` work too.
 
 ## Good to know
 
-- An agent can stay on your own machine and drive the VM with `ssh dev <command>`.
-  The `Control` lines let its commands share one connection, which is quicker.
+- An agent can stay on your own machine and drive the VM with `anytarts ssh <command>`.
+  Commands share one connection, which is quicker.
 - The first command waits for the VM to boot, and says so on stderr.
 - macOS has to allow anytarts under Privacy & Security > Local Network.
 - Shutting down closes whatever is running.
