@@ -19,7 +19,9 @@ over SSH. The code and its git checkout live in the VM.
 - Copy files with `scp FILE dev:PATH` and `scp dev:PATH FILE`.
 - Boot a simulator with `anytarts ssh 'xcrun simctl boot "iPhone 18 Pro"'`. List
   what's there with `anytarts ssh 'xcrun simctl list devices available'`.
-- Look at the simulator with `anytarts screenshot shot.png`, then read the file.
+- Look at the simulator with `anytarts screenshot shot.png`, then read the
+  file it names. A foldable has two screens, so it saves one file for each, such as
+  `shot-display1.png`. Use `--display 1` for just one.
 - Commit and push work often. Only what's on GitHub survives the VM being wiped.
 - If something can't connect, run `anytarts doctor` and tell the user what it
   says.

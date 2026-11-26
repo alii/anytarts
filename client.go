@@ -26,7 +26,7 @@ const usage = `anytarts controls your VM from your own Mac.
   anytarts setup HOST       set this Mac up to use the VM behind HOST
   anytarts ssh [COMMAND]    open a terminal in the VM, or run a command there
   anytarts screen           see the VM's screen
-  anytarts screenshot [F]   save a picture of the VM's iPhone simulator
+  anytarts screenshot [F]   save a picture of the VM's simulator (--display N for one screen)
   anytarts unlock           unlock the VM's keychain
   anytarts doctor           find out what's wrong
   anytarts guide            print the guide for agents (--install adds it to Claude Code)
@@ -266,24 +266,83 @@ func relay(l net.Listener, grace time.Duration) {
 	}
 }
 
+var (
+	validDisplay = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+	displayLine  = regexp.MustCompile(`(?m)^\s*--display=(\d+)\s`)
+)
+
 func screenshot(args []string) error {
-	path := "simulator-" + time.Now().Format("20060102-150405") + ".png"
-	if len(args) > 1 {
-		return errors.New("usage: anytarts screenshot [FILE]")
+	f := flag.NewFlagSet("screenshot", flag.ContinueOnError)
+	display := f.String("display", "", "which of the simulator's screens, if it has several")
+	if err := f.Parse(args); err != nil {
+		return err
 	}
-	if len(args) == 1 {
-		path = args[0]
+	if f.NArg() > 1 || strings.HasPrefix(f.Arg(0), "-") {
+		return errors.New("usage: anytarts screenshot [--display N] [FILE]")
 	}
-	var out bytes.Buffer
-	c := exec.Command("ssh", vmName, "xcrun simctl io booted screenshot --type=png -")
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, &out, os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("no screenshot; is a simulator booted in the VM? %w", err)
+	path := f.Arg(0)
+	if path == "" {
+		path = "simulator-" + time.Now().Format("20060102-150405") + ".png"
 	}
-	if !bytes.HasPrefix(out.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+	if *display != "" && !validDisplay.MatchString(*display) {
+		return fmt.Errorf("%q isn't a display", *display)
+	}
+	png, stderr, err := capture(*display)
+	if err == nil {
+		return savePicture(path, png)
+	}
+	// A foldable has a screen inside and out, and simctl won't choose. Nor can
+	// we tell which is in use, so save them all.
+	found := displayLine.FindAllStringSubmatch(stderr, -1)
+	if *display != "" || len(found) == 0 {
+		fmt.Fprint(os.Stderr, stderr)
+		return fmt.Errorf("no screenshot: %w", err)
+	}
+	ext := filepath.Ext(path)
+	for _, m := range found {
+		png, stderr, err := capture(m[1])
+		if err != nil {
+			fmt.Fprint(os.Stderr, stderr)
+			return fmt.Errorf("no screenshot of display %s: %w", m[1], err)
+		}
+		if err := savePicture(strings.TrimSuffix(path, ext)+"-display"+m[1]+ext, png); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func capture(display string) (png []byte, stderr string, err error) {
+	cmd := "xcrun simctl io booted screenshot --type=png"
+	if display != "" {
+		cmd += " --display=" + display
+	}
+	var out, errs bytes.Buffer
+	c := exec.Command("ssh", vmName, cmd+" -")
+	c.Stdin, c.Stdout = os.Stdin, &out
+	c.Stderr = &progress{to: os.Stderr, all: &errs}
+	err = c.Run()
+	return out.Bytes(), errs.String(), err
+}
+
+// progress passes on anytarts' own messages as they come, and keeps the rest to
+// be shown only if they turn out to matter.
+type progress struct {
+	to, all io.Writer
+}
+
+func (p *progress) Write(b []byte) (int, error) {
+	if bytes.HasPrefix(b, []byte("[anytarts]")) {
+		return p.to.Write(b)
+	}
+	return p.all.Write(b)
+}
+
+func savePicture(path string, png []byte) error {
+	if !bytes.HasPrefix(png, []byte("\x89PNG\r\n\x1a\n")) {
 		return errors.New("the VM didn't send back a picture")
 	}
-	if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, png, 0o644); err != nil {
 		return err
 	}
 	fmt.Println(path)

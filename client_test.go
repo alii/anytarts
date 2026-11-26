@@ -115,3 +115,42 @@ func TestKeychainPathExpands(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 }
+
+func TestScreenshotTwoDisplays(t *testing.T) {
+	dir := t.TempDir()
+	// The message simctl really gave for a foldable.
+	fakeSSH(t, `case "$2" in
+*--display=*) printf '\211PNG\r\n\032\n'; echo "$2" ;;
+*) cat >&2 <<X
+An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=22):
+Cannot choose between 2 displays. Specify one with --display:
+    --display=3  LCD-1 (primary-1) 2007x2853
+    --display=1  LCD (primary) 1398x2034
+Invalid argument
+X
+exit 22 ;;
+esac
+`)
+	if err := screenshot([]string{filepath.Join(dir, "a.png")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"1", "3"} {
+		b, _ := os.ReadFile(filepath.Join(dir, "a-display"+n+".png"))
+		if !strings.Contains(string(b), "--display="+n+" ") {
+			t.Errorf("display %s: %q", n, b)
+		}
+	}
+	if err := screenshot([]string{"--display=3", filepath.Join(dir, "b.png")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "b.png")); err != nil {
+		t.Fatal(err)
+	}
+	if screenshot([]string{"--display=1;id"}) == nil {
+		t.Fatal("took an odd display")
+	}
+	f, _ := os.ReadDir(dir)
+	if len(f) != 3 {
+		t.Fatal(f)
+	}
+}
