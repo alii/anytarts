@@ -16,20 +16,26 @@ Copy `anytarts.example.toml` to `anytarts.toml`, fill it in, then:
 
 The first run prints a Tailscale sign-in link. VMs are kept off the local
 network with [softnet](https://github.com/cirruslabs/softnet), and won't start
-if it isn't installed. `isolate = false` turns that off.
+if it isn't installed. They can't open connections to the Mac either, except for
+DNS. `isolate = false` turns that off.
 
 ## Connecting
 
     Host dev
       User admin
       ProxyJump anytarts
+      ControlMaster auto
+      ControlPath ~/.ssh/cm-%C
+      ControlPersist 5m
 
 Use `ssh dev`. For Screen Sharing, run `ssh -L 5901:localhost:5900 dev` and open
 `vnc://localhost:5901`.
 
 ## Good to know
 
-- Run `claude` inside `tmux` so it survives a dropped connection.
-- Shutting down closes whatever is running, `tmux` included.
+- An agent can stay on your own machine and drive the VM with `ssh dev <command>`.
+  The `Control` lines let its commands share one connection, which is quicker.
+- The first command waits for the VM to boot.
+- Shutting down closes whatever is running.
 - A change to `image` doesn't touch a VM that already exists. To wipe one, run
   `tart delete dev`; the next connection makes a new copy.

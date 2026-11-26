@@ -179,3 +179,30 @@ func TestConfig(t *testing.T) {
 		t.Fatal("took a misspelt setting")
 	}
 }
+
+func TestStartIsolates(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "args")
+	bin := filepath.Join(dir, "tart")
+	os.WriteFile(bin, []byte("#!/bin/sh\nfor a; do echo \"$a\"; done > "+out+"\n"), 0o755)
+	os.WriteFile(filepath.Join(dir, "softnet"), []byte("#!/bin/sh\n"), 0o755)
+	tt := tart{bin, dir}
+
+	t.Setenv("PATH", "/usr/bin:/bin")
+	if err := tt.Start(t.Context(), "dev", VMConfig{}); err == nil {
+		t.Fatal("started without softnet")
+	}
+	t.Setenv("PATH", dir+":/usr/bin:/bin")
+	if err := tt.Start(t.Context(), "dev", VMConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "run\ndev\n--no-graphics\n--net-softnet\n--net-softnet-block=out @host\n--net-softnet-allow=out proto udp @host port 53\n"
+	var got []byte
+	for range 100 {
+		if got, _ = os.ReadFile(out); string(got) == want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%q", got)
+}

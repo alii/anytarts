@@ -23,6 +23,15 @@ type Hypervisor interface {
 	Stop(ctx context.Context, name string) error
 }
 
+// isolation keeps a VM off the local network. softnet alone still lets a VM
+// open connections to the Mac it runs on, so that is blocked too, apart from
+// DNS lookups. The Mac can still connect in, as these rules are one-way.
+var isolation = []string{
+	"--net-softnet",
+	"--net-softnet-block=out @host",
+	"--net-softnet-allow=out proto udp @host port 53",
+}
+
 type tart struct{ bin, logDir string }
 
 func (t tart) run(ctx context.Context, args ...string) (string, error) {
@@ -81,10 +90,7 @@ func (t tart) Start(ctx context.Context, name string, c VMConfig) error {
 		if _, err := exec.LookPath("softnet"); err != nil {
 			return fmt.Errorf("softnet isn't installed, so %s can't be isolated: %w", name, err)
 		}
-		args = append(args, "--net-softnet")
-		if len(c.SoftnetBlock) > 0 {
-			args = append(args, "--net-softnet-block="+strings.Join(c.SoftnetBlock, ","))
-		}
+		args = append(args, isolation...)
 	}
 	log, err := os.OpenFile(filepath.Join(t.logDir, name+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -110,7 +116,7 @@ func (t tart) IP(ctx context.Context, name string) (string, error) {
 // plug if it hasn't after a minute.
 func (t tart) Stop(ctx context.Context, name string) error {
 	ask, cancel := context.WithTimeout(ctx, 10*time.Second)
-	t.run(ask, "exec", name, "sudo", "-n", "shutdown", "-h", "now")
+	t.run(ask, "exec", name, "sudo", "-n", "/sbin/shutdown", "-h", "now")
 	cancel()
 	for range 30 {
 		_, running, _, err := t.State(ctx, name)

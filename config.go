@@ -26,8 +26,7 @@ type VMConfig struct {
 	Ports    []uint32 `toml:"ports"`
 	// Isolate keeps the VM off the local network with softnet. It is on unless
 	// the file turns it off, and a VM that wants it won't start without it.
-	Isolate      *bool    `toml:"isolate"`
-	SoftnetBlock []string `toml:"softnet_block"`
+	Isolate *bool `toml:"isolate"`
 }
 
 func (c VMConfig) isolated() bool { return c.Isolate == nil || *c.Isolate }
