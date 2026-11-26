@@ -15,6 +15,7 @@ import (
 func fakeSSH(t *testing.T, script string) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\n"+script), 0o755)
+	os.WriteFile(filepath.Join(dir, "security"), []byte("#!/bin/sh\nexit 44\n"), 0o755)
 	t.Setenv("PATH", dir+":/usr/bin:/bin")
 }
 
@@ -176,5 +177,28 @@ esac
 	f, _ := os.ReadDir(dir)
 	if len(f) != 3 {
 		t.Fatal(f)
+	}
+}
+
+func TestUnlockSendsPasswordOnStdin(t *testing.T) {
+	dir := t.TempDir()
+	fakeSSH(t, `echo "$@" >> `+dir+`/args
+case "$*" in *"security -i"*) cat > `+dir+`/in ;; esac`)
+	if err := unlock(`a"b\c`); err != nil {
+		t.Fatal(err)
+	}
+	in, _ := os.ReadFile(filepath.Join(dir, "in"))
+	if string(in) != `unlock-keychain -p "a\"b\\c" /Users/admin/Library/Keychains/login.keychain-db`+"\n" {
+		t.Errorf("%q", in)
+	}
+	if args, _ := os.ReadFile(filepath.Join(dir, "args")); strings.Contains(string(args), `a"b`) {
+		t.Errorf("password in arguments: %s", args)
+	}
+	if unlock("a\nlist-keychains") == nil {
+		t.Error("took a second line")
+	}
+	fakeSSH(t, "exit 1")
+	if unlock("x") == nil {
+		t.Error("thought a locked keychain was unlocked")
 	}
 }

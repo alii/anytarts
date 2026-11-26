@@ -30,6 +30,8 @@ const usage = `anytarts controls your VM from your own Mac.
                             3000:8080 (this Mac's port, then the VM's)
   anytarts screen           see the VM's screen
   anytarts screenshot [F]   save a picture of the VM's simulator (--display N for one screen)
+  anytarts login            save the VM's password, so its keychain unlocks itself
+                            (--forget removes it)
   anytarts unlock           unlock the VM's keychain
   anytarts doctor           find out what's wrong
   anytarts guide            print the guide for agents (--install adds it to Claude Code)
@@ -66,12 +68,10 @@ func client(args []string) error {
 			return err
 		}
 		return become("ssh", append([]string{vmName}, args...)...)
+	case "login":
+		return login(args)
 	case "unlock":
-		if err := wake(); err != nil {
-			return err
-		}
-		fmt.Println("This lasts until your shared connection closes, about 5 minutes after the last command.")
-		return become("ssh", "-t", vmName, "security unlock-keychain "+keychain)
+		return unlockCommand()
 	case "forward":
 		return forwardPorts(args)
 	case "screen":
@@ -102,21 +102,124 @@ func become(name string, args ...string) error {
 	return syscall.Exec(path, append([]string{name}, args...), os.Environ())
 }
 
-// wake logs in once, showing the doorman's messages, unless a shared connection
-// is already open. Without it they'd be lost when there's no terminal, because
-// ssh hides a proxy's stderr from a connection that uses ControlPersist.
+// wake opens the shared connection if it isn't already, and unlocks the VM's
+// keychain if the password is saved. The unlock has to be on that connection, as
+// it lasts as long as the connection does.
 func wake() error {
-	if exec.Command("ssh", "-O", "check", vmName).Run() == nil {
-		return nil
+	if exec.Command("ssh", "-O", "check", vmName).Run() != nil {
+		args := []string{vmName, "true"}
+		if !terminal() {
+			// The doorman's messages go to the terminal. Without one, log in once
+			// in a way that leaves them on stderr.
+			args = append([]string{"-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"}, args...)
+		}
+		// No stdin: it belongs to the real command.
+		c := exec.Command("ssh", args...)
+		c.Stderr = os.Stderr
+		if err := c.Run(); err != nil {
+			return errors.New("couldn't log in to the VM; anytarts doctor may say why")
+		}
 	}
-	c := exec.Command("ssh", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", vmName, "true")
-	// No stdin: it belongs to the real command. ssh asks its questions on the
-	// terminal itself.
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return errors.New("couldn't log in to the VM; anytarts doctor may say why")
+	if pw, ok := savedPassword(); ok && !unlocked() {
+		if err := unlock(pw); err != nil {
+			fmt.Fprintln(os.Stderr, "anytarts:", err)
+		}
 	}
 	return nil
+}
+
+func terminal() bool {
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
+}
+
+func savedItem() []string { return []string{"-a", "admin", "-s", "anytarts-" + vmName} }
+
+func savedPassword() (string, bool) {
+	out, err := exec.Command("security", append([]string{"find-generic-password"}, append(savedItem(), "-w")...)...).Output()
+	return strings.TrimSuffix(string(out), "\n"), err == nil && len(out) > 1
+}
+
+func unlocked() bool {
+	return exec.Command("ssh", "-o", "BatchMode=yes", vmName, "security show-keychain-info "+keychain).Run() == nil
+}
+
+// unlock sends the password on stdin, so it's never in a list of processes here
+// or in the VM.
+func unlock(pw string) error {
+	if strings.ContainsAny(pw, "\r\n\x00") {
+		return errors.New("the saved password isn't one line; run anytarts login")
+	}
+	quote := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	c := exec.Command("ssh", "-o", "BatchMode=yes", vmName, "security -i")
+	c.Stdin = strings.NewReader(`unlock-keychain -p "` + quote.Replace(pw) + `" /Users/admin/` + strings.TrimPrefix(keychain, "~/") + "\n")
+	c.Run() // security -i doesn't report failures, so look
+	if !unlocked() {
+		return errors.New("couldn't unlock the VM's keychain; if its password changed, run anytarts login")
+	}
+	return nil
+}
+
+// correct checks the password against the VM's account. Unlocking the keychain
+// can't: while admin is logged in on the VM's screen, any password appears to work.
+func correct(pw string) bool {
+	c := exec.Command("ssh", "-o", "BatchMode=yes", vmName, "dscl . -authonly admin")
+	c.Stdin = strings.NewReader(pw + "\n")
+	return c.Run() == nil
+}
+
+// login saves the VM's password in this Mac's keychain. security asks for it, so
+// it never passes through a command line.
+func login(args []string) error {
+	if len(args) == 1 && args[0] == "--forget" {
+		if err := exec.Command("security", append([]string{"delete-generic-password"}, savedItem()...)...).Run(); err != nil {
+			return errors.New("there's no saved password")
+		}
+		fmt.Println("Forgotten.")
+		return nil
+	}
+	if len(args) > 0 {
+		return errors.New("usage: anytarts login [--forget]")
+	}
+	if err := wake(); err != nil {
+		return err
+	}
+	fmt.Println("Type the VM's password. It's kept in this Mac's keychain.")
+	c := exec.Command("security", append([]string{"add-generic-password", "-U"}, append(savedItem(), "-w")...)...)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := c.Run(); err != nil {
+		return errors.New("the password wasn't saved")
+	}
+	pw, ok := savedPassword()
+	if !ok {
+		return errors.New("the password wasn't saved")
+	}
+	if !correct(pw) {
+		exec.Command("security", append([]string{"delete-generic-password"}, savedItem()...)...).Run()
+		return errors.New("that isn't the VM's password, so it wasn't kept")
+	}
+	if err := unlock(pw); err != nil {
+		return err
+	}
+	fmt.Println("Saved. The VM's keychain will unlock by itself from now on.")
+	return nil
+}
+
+func unlockCommand() error {
+	if err := wake(); err != nil {
+		return err
+	}
+	if unlocked() {
+		fmt.Println("The VM's keychain is unlocked.")
+		return nil
+	}
+	fmt.Println("This lasts until your shared connection closes, about 5 minutes after the last command.")
+	fmt.Println("To stop being asked, run anytarts login.")
+	return become("ssh", "-t", vmName, "security unlock-keychain "+keychain)
 }
 
 func setupClient(args []string) error {
@@ -157,7 +260,7 @@ func setupClient(args []string) error {
 		c.Close()
 		fmt.Printf("%s can be reached.\n", host)
 	}
-	fmt.Printf("\nIf you're new, send this public key to whoever runs %s:\n\n%s\nThen run: anytarts ssh\n", host, pub)
+	fmt.Printf("\nIf you're new, send this public key to whoever runs %s:\n\n%s\nThen run: anytarts login\n", host, pub)
 	return nil
 }
 
@@ -265,9 +368,10 @@ func screen() error {
 	if err := wake(); err != nil {
 		return err
 	}
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	// Always the same port, so Screen Sharing can remember the password for it.
+	l, err := net.Listen("tcp", "127.0.0.1:5901")
 	if err != nil {
-		return err
+		return errors.New("port 5901 is in use; is anytarts screen already running?")
 	}
 	defer l.Close()
 	url := fmt.Sprintf("vnc://admin@%s", l.Addr())
@@ -446,10 +550,13 @@ func doctor() error {
 	}
 	fmt.Println("ok    the VM lets you in")
 
+	if err := wake(); err != nil {
+		return err
+	}
 	for _, check := range []struct{ name, cmd, fix string }{
 		{"Xcode works", "xcodebuild -version", "run anytarts ssh xcodebuild -version to see why"},
 		{"Screen Sharing is on", "/usr/bin/nc -z localhost 5900", "turn it on in the VM's System Settings, under Sharing"},
-		{"the keychain is unlocked", "security show-keychain-info " + keychain, "run anytarts unlock"},
+		{"the keychain is unlocked", "security show-keychain-info " + keychain, "run anytarts login to have it unlock itself"},
 	} {
 		if err := exec.Command("ssh", "-o", "BatchMode=yes", vmName, check.cmd).Run(); err != nil {
 			fmt.Printf("no    %s: %s\n", check.name, check.fix)
