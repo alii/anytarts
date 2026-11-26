@@ -43,7 +43,7 @@ func run(path, local string) error {
 	for name, c := range cfg.VMs {
 		vm := &VM{
 			name: name, cfg: c, max: cfg.MaxVMs, hv: tart{cfg.Tart, cfg.StateDir}, dial: dial,
-			poll: 2 * time.Second, bootTimeout: 3 * time.Minute,
+			poll: 2 * time.Second, tick: 5 * time.Second, bootTimeout: 3 * time.Minute,
 		}
 		vms[name] = vm
 		// Start the clock on a VM left running by an earlier run.

@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +23,7 @@ type fake struct {
 	mu                    sync.Mutex
 	exists, running       bool
 	others, starts, stops int
+	ipAfter               time.Time
 }
 
 func (f *fake) State(context.Context, string) (bool, bool, int, error) {
@@ -44,7 +48,12 @@ func (f *fake) Start(context.Context, string, VMConfig) error {
 	f.starts++
 	return nil
 }
-func (f *fake) IP(context.Context, string) (string, error) { return "127.0.0.1", nil }
+func (f *fake) IP(context.Context, string) (string, error) {
+	if time.Now().Before(f.ipAfter) {
+		return "", errors.New("booting")
+	}
+	return "127.0.0.1", nil
+}
 func (f *fake) Stop(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -67,6 +76,9 @@ func signer(t *testing.T) ssh.Signer {
 	return s
 }
 
+// testKeys lets a test add a key to a server from setup before it connects.
+var testKeys = map[string]map[string]string{}
+
 func setup(t *testing.T, f *fake) (addr string, key ssh.Signer) {
 	echo, _ := net.Listen("tcp", "127.0.0.1:0")
 	t.Cleanup(func() { echo.Close() })
@@ -79,12 +91,14 @@ func setup(t *testing.T, f *fake) (addr string, key ssh.Signer) {
 			go func() { io.Copy(c, c); c.Close() }()
 		}
 	}()
-	vm := &VM{name: "dev", max: 2, hv: f, poll: time.Millisecond, bootTimeout: 2 * time.Second,
+	vm := &VM{name: "dev", max: 2, hv: f, poll: time.Millisecond, tick: 20 * time.Millisecond, bootTimeout: 2 * time.Second,
 		cfg:  VMConfig{Idle: duration(150 * time.Millisecond), Ports: []uint32{22}},
 		dial: func(context.Context, string) (net.Conn, error) { return net.Dial("tcp", echo.Addr().String()) }}
 	key = signer(t)
-	s := newServer(map[string]*VM{"dev": vm}, map[string]string{string(key.PublicKey().Marshal()): "dev"}, signer(t))
+	keys := map[string]string{string(key.PublicKey().Marshal()): "dev"}
+	s := newServer(map[string]*VM{"dev": vm}, keys, signer(t))
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	testKeys[l.Addr().String()] = keys
 	t.Cleanup(func() { l.Close() })
 	go s.serve(l)
 	return l.Addr().String(), key
@@ -100,9 +114,6 @@ func TestWakesAndIdles(t *testing.T) {
 	c, err := client(addr, k)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if n, _ := f.counts(); n != 0 {
-		t.Fatal("started before anything was forwarded")
 	}
 	p, err := c.Dial("tcp", "dev:22")
 	if err != nil {
@@ -140,6 +151,9 @@ func TestRefuses(t *testing.T) {
 	if _, err := client(addr, signer(t)); err == nil {
 		t.Fatal("let in an unknown key")
 	}
+	if n, _ := f.counts(); n != 0 {
+		t.Error("an unknown key started the VM")
+	}
 	c, _ := client(addr, k)
 	for _, to := range []string{"localhost:22", "127.0.0.1:22", "192.168.1.1:22", "other:22", "dev:80"} {
 		if _, err := c.Dial("tcp", to); err == nil {
@@ -151,9 +165,6 @@ func TestRefuses(t *testing.T) {
 	}
 	if _, err := c.Listen("tcp", "127.0.0.1:0"); err == nil {
 		t.Error("allowed a reverse forward")
-	}
-	if n, _ := f.counts(); n != 0 {
-		t.Error("started the VM")
 	}
 }
 
@@ -205,4 +216,42 @@ func TestStartIsolates(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("%q", got)
+}
+
+// The messages have to show up in the ssh people really use.
+func TestMessagesInOpenSSH(t *testing.T) {
+	bin, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("no ssh")
+	}
+	f := &fake{ipAfter: time.Now().Add(150 * time.Millisecond)}
+	addr, _ := setup(t, f)
+	dir := t.TempDir()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	block, _ := ssh.MarshalPrivateKey(priv, "")
+	path := filepath.Join(dir, "k")
+	os.WriteFile(path, pem.EncodeToMemory(block), 0o600)
+	sg, _ := ssh.NewSignerFromKey(priv)
+	testKeys[addr][string(sg.PublicKey().Marshal())] = "dev"
+	host, port, _ := net.SplitHostPort(addr)
+	run := func() string {
+		cmd := exec.Command(bin, "-F", "none", "-i", path, "-p", port, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+			"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-W", "dev:22", "x@"+host)
+		cmd.Stdin = strings.NewReader("hi")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatal(err, string(out))
+		}
+		return string(out)
+	}
+	first := run()
+	for _, want := range []string{"Creating your VM", "Starting your VM", "Still starting", "Your VM is ready", "hi"} {
+		if !strings.Contains(first, want) {
+			t.Errorf("no %q in %s", want, first)
+		}
+	}
+	if second := run(); strings.Contains(second, "anytarts]") {
+		t.Errorf("spoke when the VM was up: %s", second)
+	}
+	t.Log(first)
 }

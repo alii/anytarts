@@ -53,7 +53,7 @@ func (s *Server) serve(l net.Listener) error {
 func (s *Server) handle(raw net.Conn) {
 	defer raw.Close()
 	raw.SetDeadline(time.Now().Add(20 * time.Second))
-	conn, chans, reqs, err := ssh.NewServerConn(raw, s.ssh)
+	conn, chans, reqs, err := ssh.NewServerConn(raw, s.login(raw))
 	if err != nil {
 		return
 	}
@@ -81,8 +81,42 @@ func (s *Server) handle(raw net.Conn) {
 			ch.Reject(ssh.Prohibited, "not allowed")
 			continue
 		}
+		if msg := conn.Permissions.Extensions["failed"]; msg != "" {
+			ch.Reject(ssh.ConnectionFailed, msg)
+			continue
+		}
 		go forward(ctx, vm, ch, d.Port)
 	}
+}
+
+// login wakes the VM as the last step of signing in, because that's when SSH
+// lets a server show messages. It runs only once a key's owner is proven.
+func (s *Server) login(raw net.Conn) *ssh.ServerConfig {
+	c := *s.ssh
+	var pre ssh.ServerPreAuthConn
+	c.PreAuthConnCallback = func(p ssh.ServerPreAuthConn) { pre = p }
+	c.VerifiedPublicKeyCallback = func(_ ssh.ConnMetadata, _ ssh.PublicKey, perms *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+		vm := s.vms[perms.Extensions["vm"]]
+		raw.SetDeadline(time.Now().Add(vm.bootTimeout + 20*time.Second))
+		say := func(msg string) { pre.SendAuthBanner("[anytarts] " + msg + "\r\n") }
+		if err := vm.wake(context.Background(), say); err != nil {
+			log.Printf("%s: %v", vm.name, err)
+			say("Sorry, " + explain(err) + ".")
+			// Failing the login would only say "permission denied", so let it
+			// through and refuse the forward instead.
+			perms.Extensions["failed"] = explain(err)
+		}
+		return perms, nil
+	}
+	return &c
+}
+
+// explain is what a client gets to see of an error.
+func explain(err error) string {
+	if errors.Is(err, errNoSlot) {
+		return err.Error()
+	}
+	return "the VM couldn't be reached"
 }
 
 // watch drops a client that has gone quiet, such as a closed laptop, which
@@ -117,14 +151,10 @@ func (s *Server) watch(ctx context.Context, conn ssh.Conn) {
 func forward(ctx context.Context, vm *VM, nc ssh.NewChannel, port uint32) {
 	vm.acquire()
 	defer vm.release()
-	up, err := vm.connect(ctx, port)
+	up, err := vm.connect(ctx, port, func(string) {})
 	if err != nil {
 		log.Printf("%s: %v", vm.name, err)
-		msg := "the VM couldn't be reached"
-		if errors.Is(err, errNoSlot) {
-			msg = err.Error()
-		}
-		nc.Reject(ssh.ConnectionFailed, msg)
+		nc.Reject(ssh.ConnectionFailed, explain(err))
 		return
 	}
 	defer up.Close()

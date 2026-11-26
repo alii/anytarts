@@ -19,7 +19,7 @@ type VM struct {
 	hv   Hypervisor
 	dial func(ctx context.Context, addr string) (net.Conn, error)
 
-	poll, bootTimeout time.Duration
+	poll, tick, bootTimeout time.Duration
 
 	// power is held while starting or stopping, so the two never overlap.
 	power sync.Mutex
@@ -74,10 +74,10 @@ func (v *VM) idle(gen int) {
 
 // connect starts the VM if it's off and returns a connection to port, waiting
 // for it to answer. The caller holds an acquire, so idle can't stop it.
-func (v *VM) connect(ctx context.Context, port uint32) (net.Conn, error) {
+func (v *VM) connect(ctx context.Context, port uint32, say func(string)) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, v.bootTimeout)
 	defer cancel()
-	if err := v.ensure(ctx); err != nil {
+	if err := v.ensure(ctx, say); err != nil {
 		return nil, err
 	}
 	var last error
@@ -98,7 +98,52 @@ func (v *VM) connect(ctx context.Context, port uint32) (net.Conn, error) {
 	}
 }
 
-func (v *VM) ensure(ctx context.Context) error {
+// wake gets the VM ready to log in to, telling say how it's going. It says
+// nothing if the VM is already up.
+func (v *VM) wake(ctx context.Context, say func(string)) error {
+	v.acquire()
+	defer v.release()
+	var mu sync.Mutex
+	var began time.Time
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		tick := time.NewTicker(v.tick)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				mu.Lock()
+				if !began.IsZero() {
+					say(fmt.Sprintf("Still starting (%s)...", time.Since(began).Round(time.Second)))
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+	c, err := v.connect(ctx, 22, func(msg string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if began.IsZero() {
+			began = time.Now()
+		}
+		say(msg)
+	})
+	if err != nil {
+		return err
+	}
+	c.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if !began.IsZero() {
+		say("Your VM is ready.")
+	}
+	return nil
+}
+
+func (v *VM) ensure(ctx context.Context, say func(string)) error {
 	v.power.Lock()
 	defer v.power.Unlock()
 	exists, running, total, err := v.hv.State(ctx, v.name)
@@ -109,11 +154,13 @@ func (v *VM) ensure(ctx context.Context) error {
 		return errNoSlot
 	}
 	if !exists {
+		say("Creating your VM...")
 		log.Printf("%s: creating from %s", v.name, v.cfg.Image)
 		if err := v.hv.Create(ctx, v.name, v.cfg); err != nil {
 			return err
 		}
 	}
+	say("Starting your VM...")
 	log.Printf("%s: starting", v.name)
 	if err := v.hv.Start(ctx, v.name, v.cfg); err != nil {
 		return err
