@@ -36,7 +36,9 @@ On the Mac that runs the VMs:
   anytarts -config FILE
 `
 
-const keychain = "Library/Keychains/login.keychain-db"
+// The VM's shell expands the ~. security doesn't look for relative paths in the
+// current directory, so it needs the whole path.
+const keychain = "~/Library/Keychains/login.keychain-db"
 
 // vmName is what the VM is called, both in the doorman's config and to ssh.
 var vmName = "dev"

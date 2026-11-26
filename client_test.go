@@ -108,3 +108,10 @@ func TestDiagnose(t *testing.T) {
 		}
 	}
 }
+
+func TestKeychainPathExpands(t *testing.T) {
+	out, err := exec.Command("/bin/zsh", "-fc", "echo "+keychain).Output()
+	if err != nil || !filepath.IsAbs(strings.TrimSpace(string(out))) {
+		t.Fatalf("%q %v", out, err)
+	}
+}
